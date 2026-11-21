@@ -1,0 +1,15 @@
+# Build files
+bin/
+obj/
+*.exe
+*.o
+
+# Code::Blocks temporary files
+*.depend
+*.layout
+
+# Backup files
+*_backup.cpp
+
+# IDE files
+.vscode/
