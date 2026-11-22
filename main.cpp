@@ -6,6 +6,9 @@
 #include <string>
 #include <iomanip>
 #include <cstdlib>
+#include "solar/solar_controller.h"
+#include "solar/solar_renderer.h"
+#include <chrono>
 
 using namespace std;
 
@@ -24,6 +27,12 @@ vector<Shadow> shadows;
 int winW = 1400, winH = 850;
 float simHour = 9.0f;
 float sunX = -18, sunY = 15, sunZ = -8;
+SolarController solarController;
+
+const float SUN_DISTANCE = 32.0f;
+bool showSunPath = true;
+
+int lastSolarUpdateTime = 0;
 float cameraAngle = 42, cameraHeight = 24, cameraDistance = 43;
 float cursorX = 4.2f, cursorZ = 0;
 float selectedTreeRadius = 1.8f, selectedTreeHeight = 3.4f;
@@ -53,12 +62,29 @@ void initCity() {
     }
 }
 
+
+
+
+void applySolarPosition() {
+    const SolarPosition& p = solarController.position;
+
+    // Match the existing ShadowLab scene orientation.
+    sunX = static_cast<float>(-p.directionX * SUN_DISTANCE);
+    sunY = static_cast<float>( p.directionY * SUN_DISTANCE);
+    sunZ = static_cast<float>( p.directionZ * SUN_DISTANCE);
+}
+
 void updateSun() {
-    float t=(simHour-6.0f)/12.0f;
-    if(t<0)t=0; if(t>1)t=1;
-    sunX=-22.0f+44.0f*t;
-    sunY=3.5f+22.0f*sin(PI*t);
-    sunZ=-7.0f+14.0f*t;
+    int hour = static_cast<int>(simHour);
+    int minute = static_cast<int>((simHour - hour) * 60.0f + 0.5f);
+
+    if (minute >= 60) {
+        minute = 0;
+        hour = (hour + 1) % 24;
+    }
+
+    solarController.setTime(hour, minute);
+    applySolarPosition();
 }
 
 Point projectShadow(float x,float y,float z) {
@@ -234,12 +260,14 @@ void drawTree(const Tree& t){
     glPushMatrix();glTranslatef(0,t.height,0);glutSolidSphere(t.radius,22,18);glPopMatrix();
     glPopMatrix();
 }
-void drawSun(){
-    glPushMatrix();glTranslatef(sunX,sunY,sunZ);glColor3f(1,.78f,.12f);
-    glutSolidSphere(.85,22,18);glPopMatrix();
-    // Sun direction marker
-    glDisable(GL_LIGHTING);glColor3f(1,.82f,.25f);
-    glBegin(GL_LINES);glVertex3f(sunX,sunY,sunZ);glVertex3f(sunX*.65f,0,sunZ*.65f);glEnd();
+
+
+void drawSun() {
+    SolarRenderer::drawSun(
+        solarController.position,
+        0.0f, 0.0f, 0.0f,
+        SUN_DISTANCE
+    );
 }
 void drawCursor(){
     glPushMatrix();glTranslatef(cursorX,.25f,cursorZ);glColor3f(.15f,1,.75f);
@@ -343,7 +371,17 @@ void renderScene(){
     drawGround();drawRoad();drawFootpaths();
     drawShadows();drawHeatmap();drawBuildings();
     for(size_t i=0;i<trees.size();++i)if(!trees[i].proposed||showProposed)drawTree(trees[i]);
-    drawSun();drawCursor();
+
+    if(showSunPath) {
+        SolarRenderer::drawSunPath(
+            solarController.input,
+            0.0f, 0.0f, 0.0f,
+            SUN_DISTANCE
+        );
+    }
+
+    drawSun();
+    drawCursor();
 }
 
 float evaluateWithCandidate(float x,float z){
@@ -419,6 +457,38 @@ void keyboard(unsigned char key,int,int){
         case '-':case '_':cameraDistance=min(85.0f,cameraDistance+2);break;
         case 'r':case 'R':cameraAngle=42;cameraHeight=24;cameraDistance=43;topView=false;break;
         case ' ':autoRotate=!autoRotate;break;
+
+        // Solar simulation controls:
+        // P = play/pause, O = show/hide path, J/K = -/+ 15 minutes.
+        case 'p':case 'P':
+            solarController.toggleAnimation();
+            statusMessage = solarController.animationEnabled
+                ? "Solar animation enabled."
+                : "Solar animation paused.";
+            break;
+
+        case 'o':case 'O':
+            showSunPath = !showSunPath;
+            statusMessage = showSunPath
+                ? "Sun path visible."
+                : "Sun path hidden.";
+            break;
+
+        case 'j':case 'J':
+            solarController.changeTime(-15);
+            simHour = solarController.input.hour
+                    + solarController.input.minute / 60.0f;
+            applySolarPosition();
+            computeCoverage(true);
+            break;
+
+        case 'k':case 'K':
+            solarController.changeTime(15);
+            simHour = solarController.input.hour
+                    + solarController.input.minute / 60.0f;
+            applySolarPosition();
+            computeCoverage(true);
+            break;
     }
     glutPostRedisplay();
 }
@@ -464,7 +534,32 @@ void motion(int x,int){
     if(draggingTime){setHourFromMouse(x);glutPostRedisplay();}
 }
 void idle(){
-    if(autoRotate){cameraAngle+=.12f;if(cameraAngle>360)cameraAngle-=360;}
+    if(autoRotate){
+        cameraAngle += .12f;
+        if(cameraAngle > 360) cameraAngle -= 360;
+    }
+
+    int currentTime = glutGet(GLUT_ELAPSED_TIME);
+
+    if(lastSolarUpdateTime == 0)
+        lastSolarUpdateTime = currentTime;
+
+    float deltaSeconds =
+        (currentTime - lastSolarUpdateTime) / 1000.0f;
+
+    lastSolarUpdateTime = currentTime;
+
+    if(solarController.animationEnabled){
+        solarController.update(deltaSeconds);
+
+        simHour = solarController.input.hour
+                + solarController.input.minute / 60.0f
+                + solarController.input.second / 3600.0f;
+
+        applySolarPosition();
+        computeCoverage(true);
+    }
+
     glutPostRedisplay();
 }
 
@@ -477,7 +572,16 @@ int main(int argc,char** argv){
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     glShadeModel(GL_SMOOTH);
-    initCity();updateSun();computeCoverage(true);
+    initCity();
+
+    solarController.setLocation(12.9716, 77.5946, 5.5);
+    solarController.setDate(2026, 11, 22);
+
+    simHour = 9.0f;
+    updateSun();
+    computeCoverage(true);
+    lastSolarUpdateTime = glutGet(GLUT_ELAPSED_TIME);
+
     glutDisplayFunc(display);glutReshapeFunc(reshape);
     glutKeyboardFunc(keyboard);glutSpecialFunc(specialKeys);
     glutMouseFunc(mouse);glutMotionFunc(motion);glutPassiveMotionFunc(motion);
